@@ -1,0 +1,411 @@
+import { Sequelize } from "sequelize-typescript"
+import { Router, RequestHandler } from "express"
+import { Model } from "sequelize-typescript"
+import * as crypto from "crypto"
+import * as scrypt from "scryptsy"
+import * as jwt from "jsonwebtoken"
+import * as logger from "winston"
+
+interface Auth {
+  userhash,
+  eckey?: string,
+  key?: string,
+  token?,
+  attempts?: any[]
+}
+
+interface User {
+  userhash,
+  username?,
+  name?,
+  salt?,
+  password?,
+  roles?
+}
+
+interface Role {
+  code,
+  name
+}
+
+export class AuthRouter {
+
+  private config: any
+
+  private sequelize: Sequelize
+
+  private getAuth: (userhash) => Promise<Auth>
+
+  private setAuth: (auth: Auth) => {}
+
+  private removeAuth: (userhash) => Promise<Auth>
+
+  private getCache: (key) => Promise<any>
+
+  private setCache: (key, value, duration: number) => Promise<any>
+
+  private removeCache: (key) => Promise<any>
+
+  private getUser: (filter) => Promise<User>
+
+  private getRoles: (filter) => Promise<Role[]>
+
+  private hook: (fn: RequestHandler) => RequestHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+
+  get router(): Router {
+    let router = Router()
+
+    router.get('', this.info)
+    router.post('', this.getLoginSalt)
+    router.post('/login', this.login)
+    router.get('/:token/user', this.getLoginUser)
+    router.get('/:token/refresh/:refreshToken', this.refreshToken)
+    router.delete('/:token', this.logout)
+
+    return router;
+  }
+
+  init(
+    sequelize: Sequelize, config,
+    getAuth: (id) => Promise<any>, setAuth: (auth) => {}, removeAuth: (userhash) => Promise<any>,
+    getCache: (key) => Promise<any>, setCache: (key, value, duration: number) => Promise<any>, removeCache: (key) => Promise<any>,
+    getUser: (filter) => Promise<any>, getRoles: (filter) => Promise<any[]>
+  ) {
+    this.sequelize = sequelize
+    this.config = config
+    this.getAuth = getAuth
+    this.setAuth = setAuth
+    this.removeAuth = removeAuth
+    this.getCache = getCache
+    this.setCache = setCache
+    this.removeCache = removeCache
+    this.getUser = getUser
+    this.getRoles = getRoles
+  }
+
+  info = this.hook((req, res, next) => {
+    res.json({ msg: 'Hello World' })
+  })
+
+  private getSalt = (create: boolean = true, key: string = null): { key, value } => {
+    if (!key) {
+      key = String(Math.floor(Date.now() / 900000))
+    }
+    return { key: key, value: 'dodol' }
+  }
+
+  getLoginSalt = this.hook(async (req, res, next) => {
+    let userhash = req.body.userhash
+    if (!userhash) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'getLoginSalt: no user hash' }
+
+    if (!req.body.nonce) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'getLoginSalt: no nonce' }
+    let hmac = crypto.createHmac("sha256", req.body.nonce)
+    hmac.update(String(req.body.iat))
+    hmac.update(Buffer.from(req.body.eckey, 'base64'))
+    hmac.update(Buffer.from(userhash, 'base64'))
+    let dig = hmac.digest('hex')
+    if (dig.slice(-3) !== '000') throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'getLoginSalt: invalid nonce' }
+
+    let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+
+    let ecdh = crypto.createECDH('secp256k1')
+    ecdh.generateKeys()
+
+    let va = await this.getAuth(userhash)
+    if (!va) {
+      va = { userhash: userhash }
+    }
+    va.eckey = ecdh.getPrivateKey('base64')
+    va.key = ecdh.computeSecret(Buffer.from(req.body.eckey, 'base64')).toString('base64')
+    this.setAuth(va)
+
+    let user: User = await this.getUser({ userhash: userhash })
+    if (!user) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'getLoginSalt: Invalid user' }
+
+    let loginSalt: any = { sub: userhash, cip: ip, salt: user.salt, eckey: ecdh.getPublicKey('base64') }
+    loginSalt.scrypt = this.config.scrypt
+    let salt = (await this.getSalt())
+    loginSalt.sk = salt.key
+
+    res.json({
+      salt: jwt.sign(loginSalt, salt.value, {
+        expiresIn: "120s"
+      }) as string
+    })
+  })
+
+  login = this.hook(async (req, res, next) => {
+    let trx = await this.sequelize.transaction()
+    try {
+      if (!req.body.salt) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: no login salt' }
+      let loginSalt = jwt.decode(req.body.salt)
+
+      if (!req.body.eckey) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: no eckey' }
+      if (!req.body.passkey2) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: no passkey2' }
+      if (!req.body.nonce) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: no nonce' }
+      let hmac = crypto.createHmac("sha256", req.body.nonce)
+      hmac.update(req.body.salt)
+      hmac.update(Buffer.from(req.body.eckey, 'base64'))
+      hmac.update(req.body.passkey2)
+      let dig = hmac.digest('hex')
+      if (dig.slice(-3) !== '000') throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: invalid nonce' }
+
+      let userhash = loginSalt.sub
+      let cpasskey2 = req.body.passkey2
+
+      let va = await this.getAuth(userhash)
+      if (!va) throw { status: 400, name: 'AuthError', message: 'Invalid request' }
+
+      let ecdh = crypto.createECDH('secp256k1')
+      ecdh.setPrivateKey(Buffer.from(va.eckey, 'base64'))
+
+      if (ecdh.getPublicKey('base64') !== loginSalt.eckey) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: invalid eckey' }
+
+      let salt = await this.getSalt(false, loginSalt.sk)
+      if (!salt) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: no salt' }
+      loginSalt = jwt.verify(req.body.salt, salt.value)
+      let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      if (ip !== loginSalt.cip) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: invalid ip' }
+
+      let user: User = await this.getUser({ userhash: userhash })
+      if (!user) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'login: Invalid user' }
+
+      let passkey2 = scrypt(user.password, req.body.salt, this.config.scrypt.N, this.config.scrypt.r, this.config.scrypt.p, 64).toString('base64')
+      if (passkey2 != req.body.passkey2) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'login: Invalid password' }
+
+      let tokenData: any = {
+        sub: userhash,
+        sk: salt.key,
+        cip: ip,
+        user: {
+          username: user.username,
+          name: user.name
+        },
+        roles: user.roles.map(v => v.code)
+      }
+
+      let token = jwt.sign(
+        tokenData,
+        salt.value,
+        { expiresIn: this.config.tokenExpiry }
+      ) as string
+
+      va.token = jwt.sign(
+        { sub: userhash, sk: salt.key, cip: ip },
+        salt.value,
+        { expiresIn: this.config.refreshTokenExpiry }
+      ) as string
+      if (!va.attempts) va.attempts = [] as any
+      va.attempts.push({ time: new Date(), saltKey: salt.key })
+      if (va.attempts.length > 10) va.attempts = va.attempts.slice(-10)
+
+      this.setAuth(va)
+
+      let aes = crypto.createCipheriv('aes-256-ctr', Buffer.from(va.key, 'base64'), ecdh.getPublicKey().slice(0, 16))
+      let xuser = Buffer.concat([aes.update(Buffer.from(JSON.stringify(user))), aes.final()]).toString("base64")
+
+      hmac = crypto.createHmac('sha256', Buffer.from(va.key, 'base64'))
+      hmac.update(token)
+      hmac.update(va.token)
+      hmac.update(xuser)
+
+      trx.commit()
+
+      res.json({ token: token, refreshToken: va.token, user: xuser, sig: hmac.digest('base64') })
+    } catch (err) {
+      await trx.rollback()
+      throw err
+    }
+  })
+
+  getLoginUser = this.hook(async (req, res, next) => {
+    if (!req.params.token) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'getLoginUser: no token' }
+    let token = jwt.decode(req.params.token)
+    let salt = await this.getSalt(false, token.sk)
+    token = jwt.verify(req.params.token, salt.value)
+
+    let va = await this.getAuth(token.sub)
+    if (!va) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'getLoginUser: no va' }
+
+    let user = await this.getUser({ userhash: token.sub })
+    if (!user) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'getLoginUser: no user' }
+    res.json(user)
+  })
+
+  refreshToken = this.hook(async (req, res, next) => {
+    let trx = await this.sequelize.transaction()
+    try {
+      if (!req.params.token) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: no token' }
+      let token = jwt.decode(req.params.token)
+      let salt = await this.getSalt(false, token.sk)
+      token = jwt.verify(req.params.token, salt.value, { ignoreExpiration: true })
+
+      let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      if (ip !== token.cip) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: invalid ip' }
+
+      if (!req.params.refreshToken) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: no refreshToken' }
+      let refreshToken = jwt.decode(req.params.refreshToken)
+      salt = await this.getSalt(false, refreshToken.sk)
+      refreshToken = jwt.verify(req.params.refreshToken, salt.value)
+
+      if (token.sub !== refreshToken.sub) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: invalid refreshToken.sub' }
+      if (ip !== refreshToken.cip) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: invalid refreshToken ip' }
+
+      let va = await this.getAuth(token.sub)
+      if (!va) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: no va' }
+      let ecdh = crypto.createECDH('secp256k1')
+      ecdh.setPrivateKey(Buffer.from(va.eckey, 'base64'))
+
+      let user: User = await this.getUser({ userhash: token.sub })
+      if (!user) throw { status: 401, name: 'AuthError', message: 'Invalid user', detail: 'refreshToken: no user' }
+
+      let tokenData: any = {
+        sub: refreshToken.sub,
+        sk: salt.key,
+        cip: ip,
+        user: {
+          username: user.username,
+          name: user.name
+        },
+        roles: user.roles.map(v => v.code)
+      }
+
+      let newToken = jwt.sign(
+        tokenData,
+        salt.value,
+        { expiresIn: this.config.tokenExpiry }
+      ) as string
+
+      va.token = jwt.sign(
+        { sub: token.sub, sk: salt.key, cip: ip },
+        salt.value,
+        { expiresIn: this.config.refreshTokenExpiry }
+      ) as string
+      if (!va.attempts) va.attempts = [] as any
+      va.attempts.push({ time: new Date(), saltKey: salt.key })
+      if (va.attempts.length > 10) va.attempts = va.attempts.slice(-10)
+
+      this.setAuth(va)
+
+      let aes = crypto.createCipheriv('aes-256-ctr', Buffer.from(va.key, 'base64'), ecdh.getPublicKey().slice(0, 16))
+      let xuser = Buffer.concat([aes.update(Buffer.from(JSON.stringify(user))), aes.final()]).toString("base64")
+
+      let hmac = crypto.createHmac('sha256', Buffer.from(va.key, 'base64'))
+      hmac.update(newToken)
+      hmac.update(va.token)
+      hmac.update(xuser)
+
+      trx.commit()
+
+      res.json({ token: newToken, refreshToken: va.token, user: xuser, sig: hmac.digest('base64') })
+    } catch (err) {
+      await trx.rollback()
+      throw err
+    }
+  })
+
+  logout = this.hook(async (req, res, next) => {
+    let trx = await this.sequelize.transaction()
+    try {
+      if (!req.params.token) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'logout: no token' }
+      let token = jwt.decode(req.params.token)
+      let salt = await this.getSalt(false, token.sk)
+      token = jwt.verify(req.params.token, salt.value)
+
+      let va = await this.removeAuth(token.sub)
+
+      trx.commit()
+
+      res.json({ token: token })
+    } catch (err) {
+      await trx.rollback()
+      throw err
+    }
+  })
+
+  validateAuthorization = async (req, res, next) => {
+    try {
+      let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+      let bip = await this.getCache('block:' + ip)
+      if (bip) {
+        if (bip === 't') {
+          throw { status: 400, name: 'AuthError', message: 'IP blocked', detail: 'validateAuthorization: ip blocked' }
+        }
+      }
+
+      if (req.headers.authorization) {
+        let auth = req.headers.authorization as string
+        let authKey = auth.slice(7).trim()
+
+        let token = jwt.decode(authKey)
+        let salt = await this.getSalt(false, token.sk)
+        if (!salt) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid salt' }
+        token = jwt.verify(authKey, salt.value)
+
+        res.locals.token = token
+
+        if (ip !== token.cip) {
+          throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'invalid ip' }
+        }
+        let ac = await this.getCache('auth:' + token.sub)
+        if (ac) {
+          res.locals.permissions = ac.permissions
+          res.locals.key = ac.key
+        } else {
+          let permissions = []
+          if (!auth) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: no authorization' }
+          if (!auth.startsWith("Bearer ")) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: no authorization' }
+          let roles = await this.getRoles({ code: token.roles })
+          roles.forEach((v: any) => {
+            if (v.code === 'root') {
+              permissions.push('root')
+            } else if (v.permissions) {
+              for (let vk in v.permissions) {
+                if (typeof v.permissions[vk] === 'boolean' && v.permissions[vk]) {
+                  permissions.push(vk)
+                }
+              }
+            }
+          })
+          let va = await this.getAuth(token.sub)
+          ac = { permissions: permissions, key: Buffer.from(va.key, 'base64') }
+          this.setCache('auth:' + token.sub, ac, 10)
+          res.locals.permissions = permissions
+          res.locals.key = ac.key
+        }
+      } else {
+        res.locals.permissions = []
+      }
+      return next()
+    } catch (err) {
+      return next(err)
+    }
+  }
+}
+
+export const hook = fn => (req, res, next) => {
+  try {
+    if (req.headers.authorization) {
+      if (res.locals.key) {
+        let hmac = crypto.createHmac('sha256', res.locals.key)
+        hmac.update(String(req.headers['x-seq']))
+        hmac.update(req.url)
+        if (req.body && (req.method === "PATCH" || req.method === "POST")) {
+          hmac.update(JSON.stringify(req.body))
+        }
+        let sig = hmac.digest('base64')
+        if (sig !== req.headers['x-sig']) {
+          logger.debug(`Invalid signature '${sig}' !== '${req.headers['x-sig']}'`)
+          throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'invalid signature' }
+        }
+      } else {
+        logger.debug(`Invalid secure key`)
+      }
+    }
+    return Promise.resolve(fn(req, res, next)).catch(next)
+  } catch (e) {
+    next(e)
+  }
+}
+
+export const authRouter = new AuthRouter()
