@@ -1,6 +1,6 @@
 import * as express from "express"
 import * as bodyParser from "body-parser"
-import { authRouter, toSecond } from "../index"
+import { authRouter, toSecond, AuthParam } from "../index"
 import * as Cache from "node-cache"
 import * as crypto from "crypto"
 import * as scrypt from "scryptsy"
@@ -51,41 +51,55 @@ export class App {
   }
 
   init() {
-    authRouter.init({
-      scrypt: { N: 16384, r: 8, p: 1 },
-      secret: "thisisverysecurerandomtext",
-      tokenExpiry: "3s",
-      saltExpiry: "2m",
-      refreshTokenExpiry: "12h"
-    }, (userhash): Promise<any> => {
-      return Promise.resolve(this.authCache.get(userhash))
-    }, (va): Promise<any> => {
-      this.authCache.set(va.userhash, va, toSecond("1h"))
-      return Promise.resolve(va)
-    }, (userhash): Promise<any> => {
-      let va = this.authCache.get(userhash)
-      this.authCache.del(userhash)
-      return Promise.resolve(va)
-    }, (key): Promise<any> => {
-      return Promise.resolve(this.cache.get(key))
-    }, (key, value, duration: number): Promise<any> => {
-      this.cache.set(key, value, duration)
-      return Promise.resolve(value)
-    }, (key): Promise<any> => {
-      let value = this.cache.get(key)
-      this.cache.del(key)
-      return Promise.resolve(value)
-    }, (userhash: String): Promise<any> => {
-      return Promise.resolve(this.users.find((v): boolean => {
-        return v.userhash === userhash
-      }))
-    }, (roles: String[]): Promise<any[]> => {
-      return Promise.resolve(
-        this.roles.filter((v): boolean => {
-          return roles.indexOf(v.code) >= 0
-        })
-      )
-    })
+    let param: AuthParam = {
+      config: {
+        scrypt: { N: 16384, r: 8, p: 1 },
+        secret: "thisisverysecurerandomtext",
+        tokenExpiry: "3s",
+        saltExpiry: "2m",
+        refreshTokenExpiry: "12h"
+      },
+      getAuth: (userhash): Promise<any> => {
+        return Promise.resolve(this.authCache.get(userhash))
+      },
+      setAuth: (va): Promise<any> => {
+        this.authCache.set(va.userhash, va, toSecond("1h"))
+        return Promise.resolve(va)
+      },
+      removeAuth: (userhash): Promise<any> => {
+        let va = this.authCache.get(userhash)
+        this.authCache.del(userhash)
+        return Promise.resolve(va)
+      },
+      getCache: (key): Promise<any> => {
+        return Promise.resolve(this.cache.get(key))
+      },
+      setCache: (key, value, duration: number): Promise<any> => {
+        this.cache.set(key, value, duration)
+        return Promise.resolve(value)
+      },
+      removeCache: (key): Promise<any> => {
+        let value = this.cache.get(key)
+        this.cache.del(key)
+        return Promise.resolve(value)
+      },
+      getUser: (userhash: String): Promise<any> => {
+        return Promise.resolve(this.users.find((v): boolean => {
+          return v.userhash === userhash
+        }))
+      },
+      getRoles: (roles: String[]): Promise<any[]> => {
+        return Promise.resolve(
+          this.roles.filter((v): boolean => {
+            return roles.indexOf(v.code) >= 0
+          })
+        )
+      },
+      validateRequestSequence: (seq: String): Promise<boolean> => {
+        return Promise.resolve(true)
+      }
+    }
+    authRouter.init(param)
     this.express.disable("x-powered-by")
     this.express.use(authRouter.validateAuthorization)
     this.express.use(bodyParser.json())

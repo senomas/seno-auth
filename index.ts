@@ -27,6 +27,20 @@ interface Role {
   name
 }
 
+
+export interface AuthParam {
+  config: any,
+  getAuth: (id) => Promise<any>,
+  setAuth: (auth) => Promise<any>,
+  removeAuth: (userhash) => Promise<any>,
+  getCache: (key) => Promise<any>,
+  setCache: (key, value, duration: number) => Promise<any>,
+  removeCache: (key) => Promise<any>,
+  getUser: (userhash: String) => Promise<any>,
+  getRoles: (roles: String[]) => Promise<any[]>,
+  validateRequestSequence: (seq: String) => Promise<boolean>
+}
+
 export class AuthRouter {
 
   private config: any
@@ -47,6 +61,8 @@ export class AuthRouter {
 
   private getRoles: (codes: String[]) => Promise<Role[]>
 
+  private validateRequestSequence: (seq: String) => Promise<boolean>
+
   private hook: (fn: RequestHandler) => RequestHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
   get router(): Router {
@@ -62,21 +78,17 @@ export class AuthRouter {
     return router;
   }
 
-  init(
-    config,
-    getAuth: (id) => Promise<any>, setAuth: (auth) => Promise<any>, removeAuth: (userhash) => Promise<any>,
-    getCache: (key) => Promise<any>, setCache: (key, value, duration: number) => Promise<any>, removeCache: (key) => Promise<any>,
-    getUser: (filter) => Promise<any>, getRoles: (filter) => Promise<any[]>
-  ) {
-    this.config = config
-    this.getAuth = getAuth
-    this.setAuth = setAuth
-    this.removeAuth = removeAuth
-    this.getCache = getCache
-    this.setCache = setCache
-    this.removeCache = removeCache
-    this.getUser = getUser
-    this.getRoles = getRoles
+  init(param: AuthParam) {
+    this.config = param.config
+    this.getAuth = param.getAuth
+    this.setAuth = param.setAuth
+    this.removeAuth = param.removeAuth
+    this.getCache = param.getCache
+    this.setCache = param.setCache
+    this.removeCache = param.removeCache
+    this.getUser = param.getUser
+    this.getRoles = param.getRoles
+    this.validateRequestSequence = param.validateRequestSequence
   }
 
   info = this.hook((req, res, next) => {
@@ -325,6 +337,8 @@ export class AuthRouter {
         if (az.length > 4) {
           res.locals.requestSequence = az[3]
           res.locals.requestSignature = az[4]
+
+          if (!(await this.validateRequestSequence(az[3]))) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid request sequence' }
         }
 
         if (ip !== token.cip) {
