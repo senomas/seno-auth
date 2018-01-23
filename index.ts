@@ -1,5 +1,4 @@
 import { Router, RequestHandler } from "express"
-import { Model } from "sequelize-typescript"
 import * as crypto from "crypto"
 import * as scrypt from "scryptsy"
 import * as jwt from "jsonwebtoken"
