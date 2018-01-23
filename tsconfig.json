@@ -7,13 +7,10 @@
     "inlineSources": true,
     "declaration": true,
     "experimentalDecorators": true,
-    "emitDecoratorMetadata": true,
-    // "lib": [
-    //   "es6"
-    // ]
+    "emitDecoratorMetadata": true
   },
   "include": [
-    "*.ts"
+    "**/*.ts"
   ],
   "exclude": [
     "node_modules"
