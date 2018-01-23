@@ -26,7 +26,6 @@ interface Role {
   name
 }
 
-
 export interface AuthParam {
   config: any,
   getAuth: (id) => Promise<any>,
@@ -62,17 +61,17 @@ export class AuthRouter {
 
   private validateRequestSequence: (seq: String) => Promise<boolean>
 
-  private hook: (fn: RequestHandler) => RequestHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+  private hook = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => next(e))
 
   get router(): Router {
     let router = Router()
 
-    router.get('', this.info)
-    router.post('', this.getLoginSalt)
-    router.post('/login', this.login)
+    router.get('', this.hook(this.info))
+    router.post('', this.hook(this.getLoginSalt))
+    router.post('/login', this.hook(this.login))
     router.get('/user', this.getLoginUser)
-    router.get('/:token/refresh/:refreshToken', this.refreshToken)
-    router.delete('/:token', this.logout)
+    router.get('/:token/refresh/:refreshToken', this.hook(this.refreshToken))
+    router.delete('/:token', this.hook(this.logout))
 
     return router;
   }
@@ -90,9 +89,9 @@ export class AuthRouter {
     this.validateRequestSequence = param.validateRequestSequence
   }
 
-  info = this.hook((req, res, next) => {
+  info = (req, res, next) => {
     res.json({ msg: 'Hello World' })
-  })
+  }
 
   private getSalt = (create: boolean = true, key: string = null): { key, value } => {
     if (!key) {
@@ -101,7 +100,7 @@ export class AuthRouter {
     return { key: key, value: 'dodol' }
   }
 
-  getLoginSalt = this.hook(async (req, res, next) => {
+  getLoginSalt = async (req, res, next) => {
     let userhash = req.body.userhash
     if (!userhash) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'getLoginSalt: no user hash' }
 
@@ -139,9 +138,9 @@ export class AuthRouter {
         expiresIn: "120s"
       }) as string
     })
-  })
+  }
 
-  login = this.hook(async (req, res, next) => {
+  login = async (req, res, next) => {
     if (!req.body.salt) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: no login salt' }
     let loginSalt = jwt.decode(req.body.salt)
 
@@ -159,7 +158,6 @@ export class AuthRouter {
     let cpasskey2 = req.body.passkey2
 
     let va = await this.getAuth(userhash)
-    logger.info('AUTH', va)
     if (!va) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: `No auth ${userhash}` }
 
     let ecdh = crypto.createECDH('secp256k1')
@@ -169,7 +167,11 @@ export class AuthRouter {
 
     let salt = await this.getSalt(false, loginSalt.sk)
     if (!salt) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: no salt' }
-    loginSalt = jwt.verify(req.body.salt, salt.value)
+    try {
+      loginSalt = jwt.verify(req.body.salt, salt.value)
+    } catch (err) {
+      throw { status: 403, name: 'TokenExpiredError', message: err.message, detail: 'login: salt jwt error' }
+    }
     let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
     if (ip !== loginSalt.cip) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: invalid ip' }
 
@@ -216,9 +218,9 @@ export class AuthRouter {
     hmac.update(xuser)
 
     res.json({ token: token, refreshToken: va.token, user: xuser, sig: hmac.digest('base64') })
-  })
+  }
 
-  getLoginUser = hook(async (req, res, next) => {
+  getLoginUser = authHook(async (req, res, next) => {
     if (!res.locals.token) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'getLoginUser: no token' }
     let token = res.locals.token
 
@@ -230,7 +232,7 @@ export class AuthRouter {
     res.json(user)
   })
 
-  refreshToken = this.hook(async (req, res, next) => {
+  refreshToken = async (req, res, next) => {
     if (!req.params.token) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: no token' }
     let token = jwt.decode(req.params.token)
     let salt = await this.getSalt(false, token.sk)
@@ -242,7 +244,11 @@ export class AuthRouter {
     if (!req.params.refreshToken) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: no refreshToken' }
     let refreshToken = jwt.decode(req.params.refreshToken)
     salt = await this.getSalt(false, refreshToken.sk)
-    refreshToken = jwt.verify(req.params.refreshToken, salt.value)
+    try {
+      refreshToken = jwt.verify(req.params.refreshToken, salt.value)
+    } catch (err) {
+      throw { status: 403, name: 'TokenExpiredError', message: err.message, detail: 'refreshToken: jwt error' }
+    }
 
     if (token.sub !== refreshToken.sub) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: invalid refreshToken.sub' }
     if (ip !== refreshToken.cip) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'refreshToken: invalid refreshToken ip' }
@@ -292,92 +298,92 @@ export class AuthRouter {
     hmac.update(xuser)
 
     res.json({ token: newToken, refreshToken: va.token, user: xuser, sig: hmac.digest('base64') })
-  })
+  }
 
-  logout = this.hook(async (req, res, next) => {
+  logout = async (req, res, next) => {
     if (!req.params.token) throw { status: 403, name: 'AuthError', message: 'Invalid request', detail: 'logout: no token' }
     let token = jwt.decode(req.params.token)
     let salt = await this.getSalt(false, token.sk)
-    token = jwt.verify(req.params.token, salt.value)
+    try {
+      token = jwt.verify(req.params.token, salt.value)
+    } catch (err) {
+      throw { status: 403, name: 'TokenExpiredError', message: err.message, detail: 'logout: jwt error' }
+    }
 
     let va = await this.removeAuth(token.sub)
 
     res.json({ token: token })
-  })
+  }
 
   validateAuthorization = this.hook(async (req, res, next) => {
-    try {
-      let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-      let bip = await this.getCache('block:' + ip)
-      if (bip) {
-        if (bip === 't') {
-          throw { status: 400, name: 'AuthError', message: 'IP blocked', detail: 'validateAuthorization: ip blocked' }
-        }
+    let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    let bip = await this.getCache('block:' + ip)
+    if (bip) {
+      if (bip === 't') {
+        throw { status: 400, name: 'AuthError', message: 'IP blocked', detail: 'validateAuthorization: ip blocked' }
+      }
+    }
+
+    if (req.headers.authorization) {
+      let auth = req.headers.authorization as string
+      if (!auth.startsWith("Bearer ")) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: no authorization' }
+      let az = auth.slice(7).trim().split(".")
+      let authKey = az[0] + "." + az[1] + "." + az[2]
+
+      let token = jwt.decode(authKey)
+      let salt = await this.getSalt(false, token.sk)
+      if (!salt) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid salt' }
+      try {
+        token = jwt.verify(authKey, salt.value)
+      } catch (err) {
+        throw { status: 403, name: 'TokenExpiredError', message: err.message, detail: 'validateAuthorization: jwt error' }
       }
 
-      if (req.headers.authorization) {
-        let auth = req.headers.authorization as string
-        if (!auth.startsWith("Bearer ")) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: no authorization' }
-        let az = auth.slice(7).trim().split(".")
-        let authKey = az[0] + "." + az[1] + "." + az[2]
+      res.locals.token = token
+      if (az.length > 4) {
+        res.locals.requestSequence = az[3]
+        res.locals.requestSignature = az[4]
 
-        let token = jwt.decode(authKey)
-        logger.debug('TOKEN', token)
-        let salt = await this.getSalt(false, token.sk)
-        if (!salt) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid salt' }
-        try {
-          token = jwt.verify(authKey, salt.value)
-        } catch (err) {
-          logger.warn(err)
-          throw { status: 403, name: 'TokenExpiredError', message: err.message, detail: 'validateAuthorization: jwt error' }
-        }
+        if (!(await this.validateRequestSequence(az[3]))) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid request sequence' }
+      } else {
+        throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: no request sequence' }
+      }
 
-        res.locals.token = token
-        if (az.length > 4) {
-          res.locals.requestSequence = az[3]
-          res.locals.requestSignature = az[4]
-
-          if (!(await this.validateRequestSequence(az[3]))) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid request sequence' }
-        }
-
-        if (ip !== token.cip) {
-          throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'invalid ip' }
-        }
-        let ac = await this.getCache('auth:' + token.sub)
-        if (ac) {
-          res.locals.permissions = ac.permissions
-          res.locals.key = ac.key
-        } else {
-          let permissions = []
-          let roles = await this.getRoles(token.roles)
-          roles.forEach((v: any) => {
-            if (v.code === 'root') {
-              permissions.push('root')
-            } else if (v.permissions) {
-              for (let vk in v.permissions) {
-                if (typeof v.permissions[vk] === 'boolean' && v.permissions[vk]) {
-                  permissions.push(vk)
-                }
+      if (ip !== token.cip) {
+        throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'invalid ip' }
+      }
+      let ac = await this.getCache('auth:' + token.sub)
+      if (ac) {
+        res.locals.permissions = ac.permissions
+        res.locals.key = ac.key
+      } else {
+        let permissions = []
+        let roles = await this.getRoles(token.roles)
+        roles.forEach((v: any) => {
+          if (v.code === 'root') {
+            permissions.push('root')
+          } else if (v.permissions) {
+            for (let vk in v.permissions) {
+              if (typeof v.permissions[vk] === 'boolean' && v.permissions[vk]) {
+                permissions.push(vk)
               }
             }
-          })
-          let va = await this.getAuth(token.sub)
-          ac = { permissions: permissions, key: Buffer.from(va.key, 'base64') }
-          this.setCache('auth:' + token.sub, ac, 10)
-          res.locals.permissions = permissions
-          res.locals.key = ac.key
-        }
-      } else {
-        res.locals.permissions = []
+          }
+        })
+        let va = await this.getAuth(token.sub)
+        ac = { permissions: permissions, key: Buffer.from(va.key, 'base64') }
+        this.setCache('auth:' + token.sub, ac, 10)
+        res.locals.permissions = permissions
+        res.locals.key = ac.key
       }
-      return next()
-    } catch (err) {
-      return next(err)
+    } else {
+      res.locals.permissions = []
     }
+    return next()
   })
 }
 
-export const hook = fn => (req, res, next) => {
+const authHook = fn => (req, res, next) => {
   try {
     if (req.headers.authorization) {
       if (res.locals.key) {
@@ -392,18 +398,21 @@ export const hook = fn => (req, res, next) => {
         }
         let sig = hmac.digest('base64')
         if (sig !== res.locals.requestSignature) {
-          logger.debug(`Invalid signature '${sig}' !== '${res.locals.requestSignature}'`)
           throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'invalid signature' }
         }
       } else {
         throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'no secret key' }
       }
+    } else {
+      throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'no authorization' }
     }
-    return Promise.resolve(fn(req, res, next)).catch(next)
+    return Promise.resolve(fn(req, res, next)).catch(e => next(e))
   } catch (e) {
     next(e)
   }
 }
+
+export const hook = authHook
 
 export function toSecond(tokenExpiryS: string): number {
   let tx = tokenExpiryS.slice(-1)

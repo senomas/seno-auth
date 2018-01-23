@@ -1,11 +1,11 @@
 {
   "name": "senomas-auth",
-  "version": "0.9.8",
+  "version": "0.9.10",
   "description": "oauth 2.0",
   "main": "./dist/index.js",
   "types": "./dist/index.d.js",
   "scripts": {
-    "build": "rm -rf dist && tsc",
+    "build": "rimraf dist && tsc",
     "deploy": "npm run build && npm publish",
     "test": "mocha -r ts-node/register test/**/*.test.ts",
     "clean": "rimraf dist"
