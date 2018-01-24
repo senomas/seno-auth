@@ -66,7 +66,7 @@ export class AuthRouter {
   get router(): Router {
     let router = Router()
 
-    router.get('', this.hook(this.info))
+    router.get('', this.hook(this.getUserhashSalt))
     router.post('', this.hook(this.getLoginSalt))
     router.post('/login', this.hook(this.login))
     router.get('/user', this.getLoginUser)
@@ -89,15 +89,15 @@ export class AuthRouter {
     this.validateRequestSequence = param.validateRequestSequence
   }
 
-  info = (req, res, next) => {
-    res.json({ msg: 'Hello World' })
-  }
-
   private getSalt = (create: boolean = true, key: string = null): { key, value } => {
     if (!key) {
       key = String(Math.floor(Date.now() / 900000))
     }
     return { key: key, value: 'dodol' }
+  }
+
+  getUserhashSalt = async (req, res, next) => {
+    res.json({ salt: this.config.userSalt })
   }
 
   getLoginSalt = async (req, res, next) => {
