@@ -38,7 +38,7 @@ export interface AuthParam {
   getUser?: (userhash: String, saltIndex: number) => Promise<any>,
   getRoles: (roles: string[]) => Promise<any[]>,
   getSaltIndex?: (req: Request) => number
-  validateNonce: (nonce: string) => Promise<boolean>
+  validateNonce: (userhash: string, seq: number) => Promise<boolean>
 }
 
 export class AuthRouter {
@@ -63,7 +63,7 @@ export class AuthRouter {
 
   private getSaltIndex: (req: Request) => number
 
-  private validateNonce: (nonce: string) => Promise<boolean>
+  private validateNonce: (userhash: string, seq: number) => Promise<boolean>
 
   private hook = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => next(e))
 
@@ -356,7 +356,7 @@ export class AuthRouter {
         res.locals.requestSequence = az[3]
         res.locals.requestSignature = az[4]
 
-        if (!(await this.validateNonce(token.sub + '.' + az[3]))) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid request sequence' }
+        if (!(await this.validateNonce(token.sub, parseInt(az[3])))) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid request sequence' }
       } else {
         throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: no request sequence' }
       }
