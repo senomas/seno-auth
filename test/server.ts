@@ -8,6 +8,7 @@ import * as logger from "winston"
 import * as http from "http"
 import * as expressWs from "express-ws"
 import { Subject } from "rxjs/Subject"
+import { Request } from "express"
 
 logger.configure({
   level: 'debug',
@@ -38,27 +39,41 @@ export class App {
     { code: 'dev', name: 'Developer' }
   ]
 
+  config = {
+    userSalt: "userhashsalt1",
+    // [
+    //   "userhashsalt1",
+    // "userhashsalt2",
+    // "userhashsalt3",
+    // "userhashsalt4",
+    // ],
+    scrypt: { N: 8192, r: 8, p: 1 },
+    secret: "thisisverysecurerandomtext",
+    tokenExpiry: "15m",
+    saltExpiry: "2m",
+    refreshTokenExpiry: "12h"
+  }
 
   constructor() {
     this.express = express()
     this.users.forEach(v => {
-      v.userhash = scrypt(v.username, 'userhashsalt', 16384, 8, 1, 64).toString('base64')
-      let salt = scrypt(v.userhash, crypto.randomBytes(64), 1, 8, 1, 64)
+      if (typeof this.config.userSalt === 'string') {
+        v.userhash = scrypt(v.username, this.config.userSalt, this.config.scrypt.N, this.config.scrypt.r, this.config.scrypt.p, 64).toString('base64')
+      } else {
+        (this.config.userSalt as any[]).forEach((us, i) => {
+          v[`userhash${i != 0 ? i : ''}`] = scrypt(v.username, us, this.config.scrypt.N, this.config.scrypt.r, this.config.scrypt.p, 64).toString('base64')
+        })
+      }
+      let salt = scrypt(v.userhash, crypto.randomBytes(64), 1, this.config.scrypt.r, this.config.scrypt.p, 64)
       v.salt = salt.toString('base64')
-      v.password = scrypt(v.password, salt, 16384, 8, 1, 64).toString('base64')
+      v.password = scrypt(v.password, salt, this.config.scrypt.N, this.config.scrypt.r, this.config.scrypt.p, 64).toString('base64')
     })
     this.init()
   }
 
   init() {
     let param: AuthParam = {
-      config: {
-        scrypt: { N: 16384, r: 8, p: 1 },
-        secret: "thisisverysecurerandomtext",
-        tokenExpiry: "3s",
-        saltExpiry: "2m",
-        refreshTokenExpiry: "12h"
-      },
+      config: this.config,
       getAuth: (userhash): Promise<any> => {
         return Promise.resolve(this.authCache.get(userhash))
       },
@@ -83,9 +98,9 @@ export class App {
         this.cache.del(key)
         return Promise.resolve(value)
       },
-      getUser: (userhash: String): Promise<any> => {
+      getUser: (userhash: String, saltIndex: number): Promise<any> => {
         return Promise.resolve(this.users.find((v): boolean => {
-          return v.userhash === userhash
+          return v[`userhash${saltIndex != 0 ? saltIndex : ''}`] === userhash
         }))
       },
       getRoles: (roles: String[]): Promise<any[]> => {
@@ -95,8 +110,21 @@ export class App {
           })
         )
       },
-      validateRequestSequence: (seq: String): Promise<boolean> => {
+      validateNonce: (nonce: String): Promise<boolean> => {
         return Promise.resolve(true)
+      },
+      getSaltIndex: (req: Request): number => {
+        if (typeof this.config.userSalt === 'string') return 0
+        let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress
+        console.log('HEADERS ', req.headers)
+        let hmac = crypto.createHmac("sha256", 'USER-SALT')
+        hmac.update(ip.toString())
+        if (req.headers['user-agent']) {
+          hmac.update(req.headers['user-agent'].toString())
+        }
+        let xor = 0
+        hmac.digest().forEach(v => xor ^= v)
+        return xor % (this.config.userSalt as any[]).length
       }
     }
     authRouter.init(param)
@@ -118,7 +146,7 @@ export class App {
 
 export const app = new App()
 export const server = http.createServer(app.express)
-server.listen(3000)
+server.listen(3789)
 server.on("error", (error: NodeJS.ErrnoException) => {
   if (error.syscall !== "listen") throw error
   switch (error.code) {

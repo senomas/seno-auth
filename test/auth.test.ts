@@ -47,7 +47,6 @@ describe("auth", function () {
 
   let username = 'dev';
   let password = 'dodol123'
-  let userhash = scrypt(username, "userhashsalt", 16384, 8, 1, 64)
 
   after((done) => {
     server.close()
@@ -57,6 +56,13 @@ describe("auth", function () {
   it("login", async () => {
     let ecdh = crypto.createECDH('secp256k1')
     ecdh.generateKeys()
+
+    let init = (await http.get(`/auth`)).body;
+    console.log('init', init)
+
+    let scp = init.scrypt
+
+    let userhash = scrypt(username, init.salt, scp.N, scp.r, scp.p, 64)
 
     let authInitReq: any = {
       iat: Math.floor(Date.now() / 1000),
@@ -70,19 +76,22 @@ describe("auth", function () {
     let salt = jwt.decode(authInit.salt)
     console.log("\n\nsalt: ", salt);
 
-    let passkey = scrypt(password, Buffer.from(salt.salt, 'base64'), 16384, 8, 1, 64).toString('base64')
-    let passkey2 = scrypt(passkey, authInit.salt, 16384, 8, 1, 64).toString('base64')
-
     let secretkey = ecdh.computeSecret(Buffer.from(salt.eckey, 'base64'))
+
+    let passkey = scrypt(password, Buffer.from(salt.salt, 'base64'), scp.N, scp.r, scp.p, 64).toString('base64')
+    let passkey2 = scrypt(passkey, authInit.salt, scp.N, scp.r, scp.p, 64)
+
+    let aes = crypto.createCipheriv('aes-256-ctr', secretkey, Buffer.from(salt.eckey, 'base64').slice(0, 16))
+    let xpasskey2 = Buffer.concat([aes.update(passkey2), aes.final()]).toString("base64")
 
     let authData: any = {
       salt: authInit.salt,
       sk: salt.sk,
       eckey: ecdh.getPublicKey('base64'),
       userhash: userhash.toString('base64'),
-      passkey2: passkey2
+      passkey2: xpasskey2
     }
-    authData.nonce = proofOfWork(authInit.salt, ecdh.getPublicKey(), passkey2)
+    authData.nonce = proofOfWork(authInit.salt, ecdh.getPublicKey(), xpasskey2)
     console.log("\n\nauthData: ", JSON.stringify(authData, undefined, 2))
 
     let seq = 0

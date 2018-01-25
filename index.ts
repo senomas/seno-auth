@@ -1,7 +1,8 @@
-import { Router, RequestHandler } from "express"
+import { Router, RequestHandler, Request } from "express"
 import * as crypto from "crypto"
 import * as scrypt from "scryptsy"
 import * as jwt from "jsonwebtoken"
+import * as querystring from "querystring"
 import * as logger from "winston"
 
 interface Auth {
@@ -29,14 +30,15 @@ interface Role {
 export interface AuthParam {
   config: any,
   getAuth: (id) => Promise<any>,
-  setAuth: (auth) => Promise<any>,
-  removeAuth: (userhash) => Promise<any>,
+  setAuth?: (auth) => Promise<any>,
+  removeAuth?: (userhash) => Promise<any>,
   getCache: (key) => Promise<any>,
   setCache: (key, value, duration: number) => Promise<any>,
-  removeCache: (key) => Promise<any>,
-  getUser: (userhash: String) => Promise<any>,
-  getRoles: (roles: String[]) => Promise<any[]>,
-  validateRequestSequence: (seq: String) => Promise<boolean>
+  removeCache?: (key) => Promise<any>,
+  getUser?: (userhash: String, saltIndex: number) => Promise<any>,
+  getRoles: (roles: string[]) => Promise<any[]>,
+  getSaltIndex?: (req: Request) => number
+  validateNonce: (nonce: string) => Promise<boolean>
 }
 
 export class AuthRouter {
@@ -55,18 +57,20 @@ export class AuthRouter {
 
   private removeCache: (key) => Promise<any>
 
-  private getUser: (userhash: String) => Promise<User>
+  private getUser: (userhash: String, saltIndex: number) => Promise<User>
 
   private getRoles: (codes: String[]) => Promise<Role[]>
 
-  private validateRequestSequence: (seq: String) => Promise<boolean>
+  private getSaltIndex: (req: Request) => number
+
+  private validateNonce: (nonce: string) => Promise<boolean>
 
   private hook = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(e => next(e))
 
   get router(): Router {
     let router = Router()
 
-    router.get('', this.hook(this.getUserhashSalt))
+    router.get('', this.hook(this.getUsernameSalt))
     router.post('', this.hook(this.getLoginSalt))
     router.post('/login', this.hook(this.login))
     router.get('/user', this.getLoginUser)
@@ -86,7 +90,8 @@ export class AuthRouter {
     this.removeCache = param.removeCache
     this.getUser = param.getUser
     this.getRoles = param.getRoles
-    this.validateRequestSequence = param.validateRequestSequence
+    this.validateNonce = param.validateNonce
+    this.getSaltIndex = param.getSaltIndex || ((req) => 0)
   }
 
   private getSalt = (create: boolean = true, key: string = null): { key, value } => {
@@ -96,8 +101,12 @@ export class AuthRouter {
     return { key: key, value: 'dodol' }
   }
 
-  getUserhashSalt = async (req, res, next) => {
-    res.json({ salt: this.config.userSalt })
+  getUsernameSalt = async (req, res, next) => {
+    if (typeof this.config.userSalt === 'string') {
+      res.json({ salt: this.config.userSalt, scrypt: this.config.scrypt })
+    } else {
+      res.json({ salt: this.config.userSalt[this.getSaltIndex(req)], scrypt: this.config.scrypt })
+    }
   }
 
   getLoginSalt = async (req, res, next) => {
@@ -112,7 +121,7 @@ export class AuthRouter {
     let dig = hmac.digest('hex')
     if (dig.slice(-3) !== '000') throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'getLoginSalt: invalid nonce' }
 
-    let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+    let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress
 
     let ecdh = crypto.createECDH('secp256k1')
     ecdh.generateKeys()
@@ -125,11 +134,10 @@ export class AuthRouter {
     va.key = ecdh.computeSecret(Buffer.from(req.body.eckey, 'base64')).toString('base64')
     this.setAuth(va)
 
-    let user: User = await this.getUser(userhash)
+    let user: User = await this.getUser(userhash, this.getSaltIndex(req))
     if (!user) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'getLoginSalt: Invalid user' }
 
     let loginSalt: any = { sub: userhash, cip: ip, salt: user.salt, eckey: ecdh.getPublicKey('base64') }
-    loginSalt.scrypt = this.config.scrypt
     let salt = (await this.getSalt())
     loginSalt.sk = salt.key
 
@@ -175,11 +183,15 @@ export class AuthRouter {
     let ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
     if (ip !== loginSalt.cip) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'login: invalid ip' }
 
-    let user: User = await this.getUser(userhash)
+    let user: User = await this.getUser(userhash, this.getSaltIndex(req))
     if (!user) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'login: Invalid user' }
 
     let passkey2 = scrypt(user.password, req.body.salt, this.config.scrypt.N, this.config.scrypt.r, this.config.scrypt.p, 64).toString('base64')
-    if (passkey2 != req.body.passkey2) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: 'login: Invalid password' }
+
+    let xaes = crypto.createDecipheriv('aes-256-ctr', Buffer.from(va.key, 'base64'), ecdh.getPublicKey().slice(0, 16))
+    let opasskey2 = Buffer.concat([xaes.update(Buffer.from(req.body.passkey2, 'base64')), xaes.final()]).toString('base64')
+
+    if (passkey2 != opasskey2) throw { status: 401, name: 'AuthError', message: 'Invalid user password', detail: `login: Invalid password '${passkey2}' != '${opasskey2}'` }
 
     let tokenData: any = {
       sub: userhash,
@@ -227,7 +239,7 @@ export class AuthRouter {
     let va = await this.getAuth(token.sub)
     if (!va) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'getLoginUser: no va' }
 
-    let user = await this.getUser(token.sub)
+    let user = await this.getUser(token.sub, this.getSaltIndex(req))
     if (!user) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'getLoginUser: no user' }
     res.json(user)
   })
@@ -258,7 +270,7 @@ export class AuthRouter {
     let ecdh = crypto.createECDH('secp256k1')
     ecdh.setPrivateKey(Buffer.from(va.eckey, 'base64'))
 
-    let user: User = await this.getUser(token.sub)
+    let user: User = await this.getUser(token.sub, this.getSaltIndex(req))
     if (!user) throw { status: 401, name: 'AuthError', message: 'Invalid user', detail: 'refreshToken: no user' }
 
     let tokenData: any = {
@@ -344,7 +356,7 @@ export class AuthRouter {
         res.locals.requestSequence = az[3]
         res.locals.requestSignature = az[4]
 
-        if (!(await this.validateRequestSequence(az[3]))) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid request sequence' }
+        if (!(await this.validateNonce(token.sub + '.' + az[3]))) throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: invalid request sequence' }
       } else {
         throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'validateAuthorization: no request sequence' }
       }
@@ -383,7 +395,7 @@ export class AuthRouter {
   })
 }
 
-const authHook = fn => (req, res, next) => {
+const authHook = fn => (req: Request, res, next) => {
   try {
     if (req.headers.authorization) {
       if (res.locals.key) {
@@ -398,7 +410,14 @@ const authHook = fn => (req, res, next) => {
         }
         let sig = hmac.digest('base64')
         if (sig !== res.locals.requestSignature) {
-          throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'invalid signature' }
+          throw {
+            status: 400, name: 'AuthError', message: 'Invalid request', detail: 'invalid signature',
+            data: process.env.NODE_ENV === "development" ? {
+              seq: res.locals.requestSequence,
+              url: req.url,
+              body: (req.body && (req.method === "PATCH" || req.method === "POST")) ? JSON.stringify(req.body) : undefined
+            } : undefined
+          }
         }
       } else {
         throw { status: 400, name: 'AuthError', message: 'Invalid request', detail: 'no secret key' }
