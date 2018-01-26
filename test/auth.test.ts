@@ -1,16 +1,17 @@
-import { app, server } from "./server"
-
 import * as mocha from "mocha";
 import * as chai from "chai";
 import * as crypto from "crypto"
 import * as scrypt from "scryptsy"
 import * as jwt from "jsonwebtoken"
 import { Subject } from "rxjs/Subject";
+import { server, appReady } from "../src/index";
+import { App, app } from "../src/app";
+import * as logger from "winston"
 
 chai.use(require('chai-http'));
 const expect = chai.expect;
 
-let http = chai.request("http://localhost:3000");
+let http: ChaiHttp.Agent = chai.request(`http://localhost:3000`)
 
 const delay = async (ms) => {
   return new Promise((resolve, reject) => {
@@ -29,17 +30,13 @@ function proofOfWork(...params): String {
     })
     let dig = hmac.digest('hex')
     if (dig.slice(-3) === '000') {
-      console.log('CALCULATING PROOF-OF-WORK DONE!', Date.now() - t0, nonce)
+      logger.debug('CALCULATING PROOF-OF-WORK DONE!', Date.now() - t0, nonce)
       return nonce
     } else {
       id++
     }
   }
 }
-
-server.on("listening", () => {
-  http = chai.request(`http://localhost:${server.address().port}`);
-})
 
 describe("auth", function () {
   this.timeout(60000);
@@ -48,17 +45,23 @@ describe("auth", function () {
   let username = 'dev';
   let password = 'dodol123'
 
-  after((done) => {
-    server.close()
-    done()
+  before((done) => {
+    logger.debug("STARTING SERVER...")
+    appReady.subscribe(port => {
+      http = chai.request(`http://localhost:${port}`)
+      logger.debug("DONE START...", port)
+      done()
+    })
   })
+
+  after((done) => server.close(done))
 
   it("login", async () => {
     let ecdh = crypto.createECDH('secp256k1')
     ecdh.generateKeys()
 
-    let init = (await http.get(`/auth`)).body;
-    console.log('init', init)
+    let init = (await http.get(`/api`)).body;
+    logger.debug('init', init)
 
     let scp = init.scrypt
 
@@ -71,10 +74,10 @@ describe("auth", function () {
     }
     authInitReq.nonce = proofOfWork(String(authInitReq.iat), ecdh.getPublicKey(), userhash)
 
-    let authInit = (await http.post(`/auth`).send(authInitReq)).body;
-    console.log("\n\nauthInit: ", authInit);
+    let authInit = (await http.post(`/api`).send(authInitReq)).body;
+    logger.debug("authInit: ", authInit);
     let salt = jwt.decode(authInit.salt)
-    console.log("\n\nsalt: ", salt);
+    logger.debug("salt: ", salt);
 
     let secretkey = ecdh.computeSecret(Buffer.from(salt.eckey, 'base64'))
 
@@ -92,20 +95,20 @@ describe("auth", function () {
       passkey2: xpasskey2
     }
     authData.nonce = proofOfWork(authInit.salt, ecdh.getPublicKey(), xpasskey2)
-    console.log("\n\nauthData: ", JSON.stringify(authData, undefined, 2))
+    logger.debug("authData: ", JSON.stringify(authData, undefined, 2))
 
     let seq = 0
 
-    let login = (await http.post(`/auth/login`).send(authData)).body;
-    console.log("\n\nlogin: ", JSON.stringify(login, undefined, 2))
+    let login = (await http.post(`/api/login`).send(authData)).body;
+    logger.debug("login: ", JSON.stringify(login, undefined, 2))
 
     let hmac = crypto.createHmac('sha256', secretkey)
     hmac.update(String(++seq))
     hmac.update(`/user`)
     let sig = hmac.digest('base64')
 
-    let user = (await http.get(`/auth/user`).set('Authorization', `Bearer ${login.token}.${seq}.${sig}`)).body;
-    console.log("\n\nuser: ", user);
+    let user = (await http.get(`/api/user`).set('Authorization', `Bearer ${login.token}.${seq}.${sig}`)).body;
+    logger.debug("user: ", user);
 
     secretkey
   })

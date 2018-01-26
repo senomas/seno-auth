@@ -1,0 +1,42 @@
+db: 
+  host: mysql
+  dialect: mysql
+  database: mtoken
+  username: root
+  password: dodol123
+ipblock:
+  period: 60s
+  blockTime: 5m
+  errorCount: 3
+auth:
+  userSalt: userhashsalt
+  scrypt:
+    N: 16384
+    r: 8
+    p: 1
+  secret: thisisverysecurerandomtext
+  tokenExpiry: 3h
+  saltExpiry: 2m
+  refreshTokenExpiry: 12h
+models:
+  user:
+    attributes:
+      username:
+        type: STRING
+        primaryKey: true
+      userhash: STRING
+      name: STRING
+      salt: STRING
+      password: STRING
+      roles: JSON
+    opts:
+      tableName: USER
+  role:
+    attributes:
+      code:
+        type: STRING
+        primaryKey: true
+      name: STRING
+      permissions: JSON
+    opts:
+      tableName: ROLE
